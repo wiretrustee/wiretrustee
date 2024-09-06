@@ -38,6 +38,7 @@ const (
 	extraIFaceBlackListFlag = "extra-iface-blacklist"
 	dnsRouteIntervalFlag    = "dns-router-interval"
 	systemInfoFlag          = "system-info"
+	profileNameFlag         = "profile"
 )
 
 var (
@@ -73,6 +74,7 @@ var (
 	anonymizeFlag           bool
 	debugSystemInfoFlag     bool
 	dnsRouteInterval        time.Duration
+	profileName             string
 
 	rootCmd = &cobra.Command{
 		Use:          "netbird",
@@ -144,6 +146,8 @@ func init() {
 	rootCmd.AddCommand(sshCmd)
 	rootCmd.AddCommand(routesCmd)
 	rootCmd.AddCommand(debugCmd)
+	rootCmd.AddCommand(profileCmd)
+	rootCmd.AddCommand(profilesCmd)
 
 	serviceCmd.AddCommand(runCmd, startCmd, stopCmd, restartCmd) // service control commands are subcommands of service
 	serviceCmd.AddCommand(installCmd, uninstallCmd)              // service installer commands are subcommands of service
