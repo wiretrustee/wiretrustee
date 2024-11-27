@@ -261,7 +261,7 @@ func (s *SqlStore) DeleteAccount(ctx context.Context, account *Account) error {
 			return result.Error
 		}
 
-		result = tx.Select(clause.Associations).Delete(account.UsersG, "account_id = ?", account.Id)
+		result = tx.Debug().Select(clause.Associations).Delete(account.UsersG, "account_id = ?", account.Id)
 		if result.Error != nil {
 			return result.Error
 		}
@@ -332,24 +332,27 @@ func (s *SqlStore) SavePeer(ctx context.Context, lockStrength LockingStrength, a
 	return nil
 }
 
-func (s *SqlStore) UpdateAccountDomainAttributes(ctx context.Context, accountID string, domain string, category string, isPrimaryDomain bool) error {
+func (s *SqlStore) UpdateAccountDomainAttributes(ctx context.Context, lockStrength LockingStrength, accountID string, domain string, category string, isPrimaryDomain *bool) error {
 	accountCopy := Account{
-		Domain:                 domain,
-		DomainCategory:         category,
-		IsDomainPrimaryAccount: isPrimaryDomain,
+		Domain:         domain,
+		DomainCategory: category,
 	}
 
-	fieldsToUpdate := []string{"domain", "domain_category", "is_domain_primary_account"}
-	result := s.db.Model(&Account{}).
-		Select(fieldsToUpdate).
-		Where(idQueryCondition, accountID).
-		Updates(&accountCopy)
+	fieldsToUpdate := []string{"domain", "domain_category"}
+	if isPrimaryDomain != nil {
+		accountCopy.IsDomainPrimaryAccount = *isPrimaryDomain
+		fieldsToUpdate = append(fieldsToUpdate, "is_domain_primary_account")
+	}
+
+	result := s.db.Clauses(clause.Locking{Strength: string(lockStrength)}).Model(&Account{}).Select(fieldsToUpdate).
+		Where(idQueryCondition, accountID).Updates(&accountCopy)
 	if result.Error != nil {
-		return result.Error
+		log.WithContext(ctx).Errorf("failed to update account domain attributes in store: %v", result.Error)
+		return status.Errorf(status.Internal, "failed to update account domain attributes in store")
 	}
 
 	if result.RowsAffected == 0 {
-		return status.Errorf(status.NotFound, "account %s", accountID)
+		return status.NewAccountNotFoundError(accountID)
 	}
 
 	return nil
@@ -434,16 +437,6 @@ func (s *SqlStore) SaveGroups(ctx context.Context, lockStrength LockingStrength,
 	if result.Error != nil {
 		return status.Errorf(status.Internal, "failed to save groups to store: %v", result.Error)
 	}
-	return nil
-}
-
-// DeleteHashedPAT2TokenIDIndex is noop in SqlStore
-func (s *SqlStore) DeleteHashedPAT2TokenIDIndex(hashedToken string) error {
-	return nil
-}
-
-// DeleteTokenID2UserIDIndex is noop in SqlStore
-func (s *SqlStore) DeleteTokenID2UserIDIndex(tokenID string) error {
 	return nil
 }
 
@@ -875,6 +868,17 @@ func (s *SqlStore) GetAccountCreatedBy(ctx context.Context, lockStrength Locking
 	}
 
 	return createdBy, nil
+}
+
+func (s *SqlStore) GetTotalAccounts(ctx context.Context) (int64, error) {
+	var count int64
+	result := s.db.Model(&Account{}).Count(&count)
+	if result.Error != nil {
+		log.WithContext(ctx).Errorf("failed to get total accounts from store: %s", result.Error)
+		return 0, status.Errorf(status.Internal, "failed to get total accounts from store")
+	}
+
+	return count, nil
 }
 
 // SaveUserLastLogin stores the last login time for a user in DB.
@@ -1445,15 +1449,19 @@ func (s *SqlStore) SavePolicy(ctx context.Context, lockStrength LockingStrength,
 }
 
 func (s *SqlStore) DeletePolicy(ctx context.Context, lockStrength LockingStrength, accountID, policyID string) error {
-	result := s.db.Clauses(clause.Locking{Strength: string(lockStrength)}).
-		Delete(&Policy{}, accountAndIDQueryCondition, accountID, policyID)
-	if err := result.Error; err != nil {
+	err := s.db.Transaction(func(tx *gorm.DB) error {
+		result := tx.Clauses(clause.Locking{Strength: string(lockStrength)}).
+			Delete(&PolicyRule{}, "policy_id = ?", policyID)
+		if result.Error != nil {
+			return result.Error
+		}
+
+		return tx.Clauses(clause.Locking{Strength: string(lockStrength)}).
+			Delete(&Policy{}, accountAndIDQueryCondition, accountID, policyID).Error
+	})
+	if err != nil {
 		log.WithContext(ctx).Errorf("failed to delete policy from store: %s", err)
 		return status.Errorf(status.Internal, "failed to delete policy from store")
-	}
-
-	if result.RowsAffected == 0 {
-		return status.NewPolicyNotFoundError(policyID)
 	}
 
 	return nil
@@ -1708,6 +1716,31 @@ func (s *SqlStore) SaveDNSSettings(ctx context.Context, lockStrength LockingStre
 		return status.NewAccountNotFoundError(accountID)
 	}
 
+	return nil
+}
+
+// SaveAccountSettings stores the account settings in DB.
+func (s *SqlStore) SaveAccountSettings(ctx context.Context, lockStrength LockingStrength, accountID string, settings *Settings) error {
+	result := s.db.Clauses(clause.Locking{Strength: string(lockStrength)}).Model(&Account{}).
+		Select("*").Where(idQueryCondition, accountID).Updates(&AccountSettings{Settings: settings})
+	if result.Error != nil {
+		log.WithContext(ctx).Errorf("failed to save account settings to store: %v", result.Error)
+		return status.Errorf(status.Internal, "failed to save account settings to store")
+	}
+
+	if result.RowsAffected == 0 {
+		return status.NewAccountNotFoundError(accountID)
+	}
+
+	return nil
+}
+
+func (s *SqlStore) CreateAccount(ctx context.Context, lockStrength LockingStrength, account *Account) error {
+	result := s.db.Clauses(clause.Locking{Strength: string(lockStrength)}).Create(&account)
+	if result.Error != nil {
+		log.WithContext(ctx).Errorf("failed to save new account in store: %v", result.Error)
+		return status.Errorf(status.Internal, "failed to save new account in store")
+	}
 	return nil
 }
 

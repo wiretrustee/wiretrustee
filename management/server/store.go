@@ -58,10 +58,13 @@ type Store interface {
 	GetAccountSettings(ctx context.Context, lockStrength LockingStrength, accountID string) (*Settings, error)
 	GetAccountDNSSettings(ctx context.Context, lockStrength LockingStrength, accountID string) (*DNSSettings, error)
 	GetAccountCreatedBy(ctx context.Context, lockStrength LockingStrength, accountID string) (string, error)
+	GetTotalAccounts(ctx context.Context) (int64, error)
 	SaveAccount(ctx context.Context, account *Account) error
 	DeleteAccount(ctx context.Context, account *Account) error
-	UpdateAccountDomainAttributes(ctx context.Context, accountID string, domain string, category string, isPrimaryDomain bool) error
+	UpdateAccountDomainAttributes(ctx context.Context, lockStrength LockingStrength, accountID string, domain string, category string, isPrimaryDomain *bool) error
 	SaveDNSSettings(ctx context.Context, lockStrength LockingStrength, accountID string, settings *DNSSettings) error
+	SaveAccountSettings(ctx context.Context, lockStrength LockingStrength, accountID string, settings *Settings) error
+	CreateAccount(ctx context.Context, lockStrength LockingStrength, account *Account) error
 
 	GetUserByPATID(ctx context.Context, lockStrength LockingStrength, patID string) (*User, error)
 	GetUserByUserID(ctx context.Context, lockStrength LockingStrength, userID string) (*User, error)
@@ -71,8 +74,6 @@ type Store interface {
 	SaveUserLastLogin(ctx context.Context, accountID, userID string, lastLogin time.Time) error
 	DeleteUser(ctx context.Context, lockStrength LockingStrength, accountID, userID string) error
 	GetTokenIDByHashedToken(ctx context.Context, secret string) (string, error)
-	DeleteHashedPAT2TokenIDIndex(hashedToken string) error
-	DeleteTokenID2UserIDIndex(tokenID string) error
 
 	GetPATByID(ctx context.Context, lockStrength LockingStrength, userID, patID string) (*PersonalAccessToken, error)
 	GetUserPATs(ctx context.Context, lockStrength LockingStrength, userID string) ([]*PersonalAccessToken, error)
@@ -83,7 +84,7 @@ type Store interface {
 
 	GetAccountGroups(ctx context.Context, lockStrength LockingStrength, accountID string) ([]*nbgroup.Group, error)
 	GetGroupByID(ctx context.Context, lockStrength LockingStrength, groupID, accountID string) (*nbgroup.Group, error)
-	GetGroupByName(ctx context.Context, lockStrength LockingStrength, groupName, accountID string) (*nbgroup.Group, error)
+	GetGroupByName(ctx context.Context, lockStrength LockingStrength, accountID, groupName string) (*nbgroup.Group, error)
 	GetGroupsByIDs(ctx context.Context, lockStrength LockingStrength, accountID string, groupIDs []string) (map[string]*nbgroup.Group, error)
 	SaveGroups(ctx context.Context, lockStrength LockingStrength, groups []*nbgroup.Group) error
 	SaveGroup(ctx context.Context, lockStrength LockingStrength, group *nbgroup.Group) error

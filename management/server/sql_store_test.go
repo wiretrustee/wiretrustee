@@ -15,6 +15,7 @@ import (
 
 	"github.com/google/uuid"
 	nbdns "github.com/netbirdio/netbird/dns"
+	"github.com/netbirdio/netbird/management/server/account"
 	nbgroup "github.com/netbirdio/netbird/management/server/group"
 	"github.com/netbirdio/netbird/management/server/posture"
 	"github.com/stretchr/testify/assert"
@@ -68,20 +69,27 @@ func TestSqlite_SaveAccount_Large(t *testing.T) {
 func runLargeTest(t *testing.T, store Store) {
 	t.Helper()
 
-	account := newAccountWithId(context.Background(), "account_id", "testuser", "")
-	groupALL, err := account.GetGroupAll()
-	if err != nil {
-		t.Fatal(err)
-	}
+	accountID := "account_id"
+
+	err := newAccountWithId(context.Background(), store, accountID, "testuser", "")
+	require.NoError(t, err, "failed to create account")
+
+	groupAll, err := store.GetGroupByName(context.Background(), LockingStrengthShare, accountID, "All")
+	require.NoError(t, err, "failed to get group All")
+
 	setupKey, _ := GenerateDefaultSetupKey()
-	account.SetupKeys[setupKey.Key] = setupKey
+	setupKey.AccountID = accountID
+	err = store.SaveSetupKey(context.Background(), LockingStrengthUpdate, setupKey)
+	assert.NoError(t, err, "failed to save setup key")
+
 	const numPerAccount = 6000
 	for n := 0; n < numPerAccount; n++ {
 		netIP := randomIPv4()
-		peerID := fmt.Sprintf("%s-peer-%d", account.Id, n)
+		peerID := fmt.Sprintf("%s-peer-%d", accountID, n)
 
 		peer := &nbpeer.Peer{
 			ID:         peerID,
+			AccountID:  accountID,
 			Key:        peerID,
 			IP:         netIP,
 			Name:       peerID,
@@ -90,16 +98,21 @@ func runLargeTest(t *testing.T, store Store) {
 			Status:     &nbpeer.PeerStatus{Connected: false, LastSeen: time.Now()},
 			SSHEnabled: false,
 		}
-		account.Peers[peerID] = peer
-		group, _ := account.GetGroupAll()
-		group.Peers = append(group.Peers, peerID)
-		user := &User{
-			Id:        fmt.Sprintf("%s-user-%d", account.Id, n),
-			AccountID: account.Id,
-		}
-		account.Users[user.Id] = user
+		err = store.AddPeerToAccount(context.Background(), peer)
+		require.NoError(t, err, "failed to add peer")
+
+		err = store.AddPeerToAllGroup(context.Background(), accountID, peerID)
+		require.NoError(t, err, "failed to add peer to all group")
+
+		err = store.SaveUser(context.Background(), LockingStrengthUpdate, &User{
+			Id:        fmt.Sprintf("%s-user-%d", accountID, n),
+			AccountID: accountID,
+		})
+		require.NoError(t, err, "failed to save user")
+
 		route := &route2.Route{
 			ID:          route2.ID(fmt.Sprintf("network-id-%d", n)),
+			AccountID:   accountID,
 			Description: "base route",
 			NetID:       route2.NetID(fmt.Sprintf("network-id-%d", n)),
 			Network:     netip.MustParsePrefix(netIP.String() + "/24"),
@@ -107,22 +120,24 @@ func runLargeTest(t *testing.T, store Store) {
 			Metric:      9999,
 			Masquerade:  false,
 			Enabled:     true,
-			Groups:      []string{groupALL.ID},
+			Groups:      []string{groupAll.ID},
 		}
-		account.Routes[route.ID] = route
+		err = store.SaveRoute(context.Background(), LockingStrengthUpdate, route)
+		require.NoError(t, err, "failed to save route")
 
-		group = &nbgroup.Group{
+		group := &nbgroup.Group{
 			ID:        fmt.Sprintf("group-id-%d", n),
-			AccountID: account.Id,
+			AccountID: accountID,
 			Name:      fmt.Sprintf("group-id-%d", n),
 			Issued:    "api",
 			Peers:     nil,
 		}
-		account.Groups[group.ID] = group
+		err = store.SaveGroup(context.Background(), LockingStrengthUpdate, group)
+		require.NoError(t, err, "failed to save group")
 
 		nameserver := &nbdns.NameServerGroup{
 			ID:                   fmt.Sprintf("nameserver-id-%d", n),
-			AccountID:            account.Id,
+			AccountID:            accountID,
 			Name:                 fmt.Sprintf("nameserver-id-%d", n),
 			Description:          "",
 			NameServers:          []nbdns.NameServer{{IP: netip.MustParseAddr(netIP.String()), NSType: nbdns.UDPNameServerType}},
@@ -132,20 +147,20 @@ func runLargeTest(t *testing.T, store Store) {
 			Enabled:              false,
 			SearchDomainsEnabled: false,
 		}
-		account.NameServerGroups[nameserver.ID] = nameserver
+		err = store.SaveNameServerGroup(context.Background(), LockingStrengthUpdate, nameserver)
+		require.NoError(t, err, "failed to save nameserver group")
 
-		setupKey, _ := GenerateDefaultSetupKey()
-		account.SetupKeys[setupKey.Key] = setupKey
+		setupKey, _ = GenerateDefaultSetupKey()
+		setupKey.AccountID = accountID
+		err = store.SaveSetupKey(context.Background(), LockingStrengthUpdate, setupKey)
+		require.NoError(t, err, "failed to save setup key")
 	}
 
-	err = store.SaveAccount(context.Background(), account)
+	totalAccounts, err := store.GetTotalAccounts(context.Background())
 	require.NoError(t, err)
+	require.Equal(t, int64(1), totalAccounts, "expected 1 account")
 
-	if len(store.GetAllAccounts(context.Background())) != 1 {
-		t.Errorf("expecting 1 Accounts to be stored after SaveAccount()")
-	}
-
-	a, err := store.GetAccount(context.Background(), account.Id)
+	a, err := store.GetAccount(context.Background(), accountID)
 	if a == nil {
 		t.Errorf("expecting Account to be stored after SaveAccount(): %v", err)
 	}
@@ -213,41 +228,53 @@ func TestSqlite_SaveAccount(t *testing.T) {
 	t.Setenv("NETBIRD_STORE_ENGINE", string(SqliteStoreEngine))
 	store, cleanUp, err := NewTestStoreFromSQL(context.Background(), "", t.TempDir())
 	t.Cleanup(cleanUp)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
-	account := newAccountWithId(context.Background(), "account_id", "testuser", "")
+	accountID := "account_id"
+	err = newAccountWithId(context.Background(), store, accountID, "testuser", "")
+	require.NoError(t, err, "failed to create account")
+
 	setupKey, _ := GenerateDefaultSetupKey()
-	account.SetupKeys[setupKey.Key] = setupKey
-	account.Peers["testpeer"] = &nbpeer.Peer{
-		Key:    "peerkey",
-		IP:     net.IP{127, 0, 0, 1},
-		Meta:   nbpeer.PeerSystemMeta{},
-		Name:   "peer name",
-		Status: &nbpeer.PeerStatus{Connected: true, LastSeen: time.Now().UTC()},
-	}
+	setupKey.AccountID = accountID
+	err = store.SaveSetupKey(context.Background(), LockingStrengthUpdate, setupKey)
+	require.NoError(t, err, "failed to save setup key")
 
-	err = store.SaveAccount(context.Background(), account)
-	require.NoError(t, err)
+	err = store.AddPeerToAccount(context.Background(), &nbpeer.Peer{
+		ID:        "testpeer",
+		Key:       "peerkey",
+		IP:        net.IP{127, 0, 0, 1},
+		AccountID: accountID,
+		Meta:      nbpeer.PeerSystemMeta{},
+		Name:      "peer name",
+		Status:    &nbpeer.PeerStatus{Connected: true, LastSeen: time.Now().UTC()},
+	})
+	require.NoError(t, err, "failed to save peer")
 
-	account2 := newAccountWithId(context.Background(), "account_id2", "testuser2", "")
+	accountID2 := "account_id2"
+	err = newAccountWithId(context.Background(), store, accountID2, "testuser2", "")
+	require.NoError(t, err, "failed to create account")
+
 	setupKey, _ = GenerateDefaultSetupKey()
-	account2.SetupKeys[setupKey.Key] = setupKey
-	account2.Peers["testpeer2"] = &nbpeer.Peer{
-		Key:    "peerkey2",
-		IP:     net.IP{127, 0, 0, 2},
-		Meta:   nbpeer.PeerSystemMeta{},
-		Name:   "peer name 2",
-		Status: &nbpeer.PeerStatus{Connected: true, LastSeen: time.Now().UTC()},
-	}
+	setupKey.AccountID = accountID2
+	err = store.SaveSetupKey(context.Background(), LockingStrengthUpdate, setupKey)
+	require.NoError(t, err, "failed to save setup key")
 
-	err = store.SaveAccount(context.Background(), account2)
-	require.NoError(t, err)
+	err = store.AddPeerToAccount(context.Background(), &nbpeer.Peer{
+		ID:        "testpeer2",
+		Key:       "peerkey2",
+		AccountID: accountID2,
+		IP:        net.IP{127, 0, 0, 2},
+		Meta:      nbpeer.PeerSystemMeta{},
+		Name:      "peer name 2",
+		Status:    &nbpeer.PeerStatus{Connected: true, LastSeen: time.Now().UTC()},
+	})
+	require.NoError(t, err, "failed to save peer")
 
 	if len(store.GetAllAccounts(context.Background())) != 2 {
 		t.Errorf("expecting 2 Accounts to be stored after SaveAccount()")
 	}
 
-	a, err := store.GetAccount(context.Background(), account.Id)
+	a, err := store.GetAccount(context.Background(), accountID)
 	if a == nil {
 		t.Errorf("expecting Account to be stored after SaveAccount(): %v", err)
 	}
@@ -295,7 +322,12 @@ func TestSqlite_DeleteAccount(t *testing.T) {
 		Name: "test token",
 	}}
 
-	account := newAccountWithId(context.Background(), "account_id", testUserID, "")
+	err = newAccountWithId(context.Background(), store, "account_id", testUserID, "")
+	require.NoError(t, err, "failed to create account")
+
+	account, err := store.GetAccount(context.Background(), "account_id")
+	require.NoError(t, err, "failed to get account")
+
 	setupKey, _ := GenerateDefaultSetupKey()
 	account.SetupKeys[setupKey.Key] = setupKey
 	account.Peers["testpeer"] = &nbpeer.Peer{
@@ -685,19 +717,29 @@ func newSqliteStore(t *testing.T) *SqlStore {
 }
 
 func newAccount(store Store, id int) error {
-	str := fmt.Sprintf("%s-%d", uuid.New().String(), id)
-	account := newAccountWithId(context.Background(), str, str+"-testuser", "example.com")
+	accountID := fmt.Sprintf("%s-%d", uuid.New().String(), id)
+	userID := accountID + "-testuser"
+
+	err := newAccountWithId(context.Background(), store, accountID, userID, "example.com")
+	if err != nil {
+		return err
+	}
+
 	setupKey, _ := GenerateDefaultSetupKey()
-	account.SetupKeys[setupKey.Key] = setupKey
-	account.Peers["p"+str] = &nbpeer.Peer{
-		Key:    "peerkey" + str,
+	setupKey.AccountID = accountID
+	err = store.SaveSetupKey(context.Background(), LockingStrengthUpdate, setupKey)
+	if err != nil {
+		return err
+	}
+
+	return store.SavePeer(context.Background(), LockingStrengthUpdate, accountID, &nbpeer.Peer{
+		ID:     "p" + accountID,
+		Key:    accountID + "-peerkey",
 		IP:     net.IP{127, 0, 0, 1},
 		Meta:   nbpeer.PeerSystemMeta{},
 		Name:   "peer name",
 		Status: &nbpeer.PeerStatus{Connected: true, LastSeen: time.Now().UTC()},
-	}
-
-	return store.SaveAccount(context.Background(), account)
+	})
 }
 
 func TestPostgresql_NewStore(t *testing.T) {
@@ -725,39 +767,53 @@ func TestPostgresql_SaveAccount(t *testing.T) {
 	t.Cleanup(cleanUp)
 	assert.NoError(t, err)
 
-	account := newAccountWithId(context.Background(), "account_id", "testuser", "")
+	accountID := "account_id"
+
+	err = newAccountWithId(context.Background(), store, accountID, "testuser", "")
+	require.NoError(t, err, "failed to create account")
+
 	setupKey, _ := GenerateDefaultSetupKey()
-	account.SetupKeys[setupKey.Key] = setupKey
-	account.Peers["testpeer"] = &nbpeer.Peer{
-		Key:    "peerkey",
-		IP:     net.IP{127, 0, 0, 1},
-		Meta:   nbpeer.PeerSystemMeta{},
-		Name:   "peer name",
-		Status: &nbpeer.PeerStatus{Connected: true, LastSeen: time.Now().UTC()},
-	}
+	setupKey.AccountID = accountID
+	err = store.SaveSetupKey(context.Background(), LockingStrengthUpdate, setupKey)
+	require.NoError(t, err, "failed to save setup key")
 
-	err = store.SaveAccount(context.Background(), account)
-	require.NoError(t, err)
+	err = store.AddPeerToAccount(context.Background(), &nbpeer.Peer{
+		ID:        "testpeer",
+		Key:       "peerkey",
+		IP:        net.IP{127, 0, 0, 1},
+		AccountID: accountID,
+		Meta:      nbpeer.PeerSystemMeta{},
+		Name:      "peer name",
+		Status:    &nbpeer.PeerStatus{Connected: true, LastSeen: time.Now().UTC()},
+	})
+	require.NoError(t, err, "failed to save peer")
 
-	account2 := newAccountWithId(context.Background(), "account_id2", "testuser2", "")
+	accountID2 := "account_id2"
+
+	err = newAccountWithId(context.Background(), store, accountID2, "testuser2", "")
+	require.NoError(t, err, "failed to create account")
+
 	setupKey, _ = GenerateDefaultSetupKey()
-	account2.SetupKeys[setupKey.Key] = setupKey
-	account2.Peers["testpeer2"] = &nbpeer.Peer{
-		Key:    "peerkey2",
-		IP:     net.IP{127, 0, 0, 2},
-		Meta:   nbpeer.PeerSystemMeta{},
-		Name:   "peer name 2",
-		Status: &nbpeer.PeerStatus{Connected: true, LastSeen: time.Now().UTC()},
-	}
+	setupKey.AccountID = accountID2
+	err = store.SaveSetupKey(context.Background(), LockingStrengthUpdate, setupKey)
+	require.NoError(t, err, "failed to save setup key")
 
-	err = store.SaveAccount(context.Background(), account2)
-	require.NoError(t, err)
+	err = store.AddPeerToAccount(context.Background(), &nbpeer.Peer{
+		ID:        "testpeer2",
+		Key:       "peerkey2",
+		AccountID: accountID2,
+		IP:        net.IP{127, 0, 0, 2},
+		Meta:      nbpeer.PeerSystemMeta{},
+		Name:      "peer name 2",
+		Status:    &nbpeer.PeerStatus{Connected: true, LastSeen: time.Now().UTC()},
+	})
+	require.NoError(t, err, "failed to save peer")
 
-	if len(store.GetAllAccounts(context.Background())) != 2 {
-		t.Errorf("expecting 2 Accounts to be stored after SaveAccount()")
-	}
+	totalAccounts, err := store.GetTotalAccounts(context.Background())
+	require.NoError(t, err, "failed to get total accounts")
+	require.Equal(t, int64(2), totalAccounts, "expecting 2 Accounts to be stored after SaveAccount()")
 
-	a, err := store.GetAccount(context.Background(), account.Id)
+	a, err := store.GetAccount(context.Background(), accountID)
 	if a == nil {
 		t.Errorf("expecting Account to be stored after SaveAccount(): %v", err)
 	}
@@ -798,31 +854,41 @@ func TestPostgresql_DeleteAccount(t *testing.T) {
 	t.Cleanup(cleanUp)
 	assert.NoError(t, err)
 
+	accountID := "account_id"
 	testUserID := "testuser"
-	user := NewAdminUser(testUserID)
-	user.PATs = map[string]*PersonalAccessToken{"testtoken": {
-		ID:   "testtoken",
-		Name: "test token",
-	}}
 
-	account := newAccountWithId(context.Background(), "account_id", testUserID, "")
+	err = newAccountWithId(context.Background(), store, accountID, testUserID, "")
+	require.NoError(t, err, "failed to create account")
+
 	setupKey, _ := GenerateDefaultSetupKey()
-	account.SetupKeys[setupKey.Key] = setupKey
-	account.Peers["testpeer"] = &nbpeer.Peer{
-		Key:    "peerkey",
-		IP:     net.IP{127, 0, 0, 1},
-		Meta:   nbpeer.PeerSystemMeta{},
-		Name:   "peer name",
-		Status: &nbpeer.PeerStatus{Connected: true, LastSeen: time.Now().UTC()},
-	}
-	account.Users[testUserID] = user
+	setupKey.AccountID = accountID
+	err = store.SaveSetupKey(context.Background(), LockingStrengthUpdate, setupKey)
+	require.NoError(t, err, "failed to save setup key")
 
-	err = store.SaveAccount(context.Background(), account)
-	require.NoError(t, err)
+	err = store.AddPeerToAccount(context.Background(), &nbpeer.Peer{
+		ID:        "testingpeer",
+		AccountID: accountID,
+		Key:       "peerkey",
+		IP:        net.IP{127, 0, 0, 1},
+		Meta:      nbpeer.PeerSystemMeta{},
+		Name:      "peer name",
+		Status:    &nbpeer.PeerStatus{Connected: true, LastSeen: time.Now().UTC()},
+	})
+	require.NoError(t, err, "failed to save peer")
 
-	if len(store.GetAllAccounts(context.Background())) != 1 {
-		t.Errorf("expecting 1 Accounts to be stored after SaveAccount()")
-	}
+	err = store.SavePAT(context.Background(), LockingStrengthUpdate, &PersonalAccessToken{
+		ID:     "testtoken",
+		UserID: testUserID,
+		Name:   "test token",
+	})
+	require.NoError(t, err, "failed to save personal access token")
+
+	totalAccounts, err := store.GetTotalAccounts(context.Background())
+	require.NoError(t, err, "failed to get total accounts")
+	require.Equal(t, int64(1), totalAccounts, "expecting 1 Accounts to be stored after SaveAccount()")
+
+	account, err := store.GetAccount(context.Background(), accountID)
+	require.NoError(t, err, "failed to get account")
 
 	err = store.DeleteAccount(context.Background(), account)
 	require.NoError(t, err)
@@ -1172,7 +1238,7 @@ func TestSqlStore_UpdateAccountDomainAttributes(t *testing.T) {
 		domain := "example.com"
 		category := "public"
 		IsDomainPrimaryAccount := false
-		err = store.UpdateAccountDomainAttributes(context.Background(), accountID, domain, category, IsDomainPrimaryAccount)
+		err = store.UpdateAccountDomainAttributes(context.Background(), LockingStrengthUpdate, accountID, domain, category, &IsDomainPrimaryAccount)
 		require.NoError(t, err)
 		account, err := store.GetAccount(context.Background(), accountID)
 		require.NoError(t, err)
@@ -1186,7 +1252,7 @@ func TestSqlStore_UpdateAccountDomainAttributes(t *testing.T) {
 		domain := "test.com"
 		category := "private"
 		IsDomainPrimaryAccount := true
-		err = store.UpdateAccountDomainAttributes(context.Background(), accountID, domain, category, IsDomainPrimaryAccount)
+		err = store.UpdateAccountDomainAttributes(context.Background(), LockingStrengthUpdate, accountID, domain, category, &IsDomainPrimaryAccount)
 		require.NoError(t, err)
 		account, err := store.GetAccount(context.Background(), accountID)
 		require.NoError(t, err)
@@ -1200,8 +1266,21 @@ func TestSqlStore_UpdateAccountDomainAttributes(t *testing.T) {
 		domain := "test.com"
 		category := "private"
 		IsDomainPrimaryAccount := true
-		err = store.UpdateAccountDomainAttributes(context.Background(), "non-existing-account-id", domain, category, IsDomainPrimaryAccount)
+		err = store.UpdateAccountDomainAttributes(context.Background(), LockingStrengthUpdate, "non-existing-account-id", domain, category, &IsDomainPrimaryAccount)
 		require.Error(t, err)
+	})
+
+	t.Run("Should update domain and category but skip primary account when isPrimary is nil", func(t *testing.T) {
+		domain := "test.com"
+		category := "private"
+		err = store.UpdateAccountDomainAttributes(context.Background(), LockingStrengthUpdate, accountID, domain, category, nil)
+		require.NoError(t, err)
+
+		account, err := store.GetAccount(context.Background(), accountID)
+		require.NoError(t, err)
+		require.Equal(t, domain, account.Domain)
+		require.Equal(t, category, account.DomainCategory)
+		require.True(t, account.IsDomainPrimaryAccount)
 	})
 
 }
@@ -2588,4 +2667,158 @@ func TestSqlStore_DeleteRoute(t *testing.T) {
 	route, err := store.GetRouteByID(context.Background(), LockingStrengthShare, accountID, routeID)
 	require.Error(t, err)
 	require.Nil(t, route)
+}
+
+func TestSqlStore_GetAccountSettings(t *testing.T) {
+	store, cleanup, err := NewTestStoreFromSQL(context.Background(), "testdata/store.sql", t.TempDir())
+	t.Cleanup(cleanup)
+	require.NoError(t, err)
+
+	tests := []struct {
+		name        string
+		accountID   string
+		expectError bool
+	}{
+		{
+			name:        "retrieve existing account settings",
+			accountID:   "bf1c8084-ba50-4ce7-9439-34653001fc3b",
+			expectError: false,
+		},
+		{
+			name:        "retrieve non-existing account settings",
+			accountID:   "non-existing",
+			expectError: true,
+		},
+		{
+			name:        "retrieve account settings with empty account ID",
+			accountID:   "",
+			expectError: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			settings, err := store.GetAccountSettings(context.Background(), LockingStrengthShare, tt.accountID)
+			if tt.expectError {
+				require.Error(t, err)
+				sErr, ok := status.FromError(err)
+				require.True(t, ok)
+				require.Equal(t, sErr.Type(), status.NotFound)
+				require.Nil(t, settings)
+			} else {
+				require.NoError(t, err)
+				require.False(t, settings.RegularUsersViewBlocked)
+				require.False(t, settings.JWTGroupsEnabled)
+				require.False(t, settings.GroupsPropagationEnabled)
+				require.False(t, settings.PeerInactivityExpirationEnabled)
+				require.False(t, settings.PeerLoginExpirationEnabled)
+				require.False(t, settings.Extra.PeerApprovalEnabled)
+				require.Equal(t, time.Duration(86400000000000), settings.PeerLoginExpiration)
+				require.Equal(t, time.Duration(0), settings.PeerInactivityExpiration)
+				require.Len(t, settings.Extra.IntegratedValidatorGroups, 0)
+			}
+		})
+	}
+}
+
+func TestSqlStore_SaveAccountSettings(t *testing.T) {
+	store, cleanup, err := NewTestStoreFromSQL(context.Background(), "testdata/store.sql", t.TempDir())
+	t.Cleanup(cleanup)
+	require.NoError(t, err)
+
+	accountID := "bf1c8084-ba50-4ce7-9439-34653001fc3b"
+
+	settings, err := store.GetAccountSettings(context.Background(), LockingStrengthShare, accountID)
+	require.NoError(t, err)
+
+	settings.Extra.IntegratedValidatorGroups = []string{"groupA"}
+	settings.RegularUsersViewBlocked = true
+	settings.PeerInactivityExpiration = 30 * time.Minute
+	err = store.SaveAccountSettings(context.Background(), LockingStrengthUpdate, accountID, settings)
+	require.NoError(t, err)
+
+	saveSettings, err := store.GetAccountSettings(context.Background(), LockingStrengthShare, accountID)
+	require.NoError(t, err)
+	require.Equal(t, settings, saveSettings)
+}
+
+func TestSqlStore_GetTotalAccounts(t *testing.T) {
+	store, cleanup, err := NewTestStoreFromSQL(context.Background(), "testdata/store.sql", t.TempDir())
+	t.Cleanup(cleanup)
+	require.NoError(t, err)
+
+	totalAccounts, err := store.GetTotalAccounts(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, int64(1), totalAccounts)
+}
+
+func TestSqlStore_AccountExists(t *testing.T) {
+	store, cleanup, err := NewTestStoreFromSQL(context.Background(), "testdata/store.sql", t.TempDir())
+	t.Cleanup(cleanup)
+	require.NoError(t, err)
+
+	t.Run("existing account", func(t *testing.T) {
+		exists, err := store.AccountExists(context.Background(), LockingStrengthShare, "bf1c8084-ba50-4ce7-9439-34653001fc3b")
+		require.NoError(t, err)
+		require.True(t, exists)
+	})
+
+	t.Run("non-existing account", func(t *testing.T) {
+		exists, err := store.AccountExists(context.Background(), LockingStrengthShare, "non-existing")
+		require.NoError(t, err)
+		require.False(t, exists)
+	})
+}
+
+func TestSqlStore_CreateAccount(t *testing.T) {
+	store, cleanup, err := NewTestStoreFromSQL(context.Background(), "testdata/store.sql", t.TempDir())
+	t.Cleanup(cleanup)
+	require.NoError(t, err)
+
+	acc := &Account{
+		Id:        "test-account",
+		CreatedAt: time.Now().UTC(),
+		Network:   NewNetwork(),
+		CreatedBy: userID,
+		Domain:    "test-domain",
+		DNSSettings: DNSSettings{
+			DisabledManagementGroups: make([]string, 0),
+		},
+		Settings: &Settings{
+			PeerLoginExpirationEnabled:      true,
+			PeerLoginExpiration:             DefaultPeerLoginExpiration,
+			GroupsPropagationEnabled:        true,
+			RegularUsersViewBlocked:         true,
+			PeerInactivityExpirationEnabled: false,
+			PeerInactivityExpiration:        DefaultPeerInactivityExpiration,
+			Extra: &account.ExtraSettings{
+				PeerApprovalEnabled:       false,
+				IntegratedValidatorGroups: make([]string, 0),
+			},
+		},
+	}
+	err = store.CreateAccount(context.Background(), LockingStrengthUpdate, acc)
+	require.NoError(t, err)
+
+	storeAccount, err := store.GetAccount(context.Background(), acc.Id)
+	require.NoError(t, err)
+	require.NotNil(t, storeAccount)
+
+	require.Equal(t, acc.Id, storeAccount.Id)
+	require.Equal(t, acc.CreatedBy, storeAccount.CreatedBy)
+	require.Equal(t, acc.Domain, storeAccount.Domain)
+	require.WithinDuration(t, acc.CreatedAt, storeAccount.CreatedAt, time.Second)
+	require.Equal(t, acc.DNSSettings.DisabledManagementGroups, storeAccount.DNSSettings.DisabledManagementGroups)
+
+	require.NotNil(t, storeAccount.Settings)
+	require.Equal(t, acc.Settings.PeerLoginExpirationEnabled, storeAccount.Settings.PeerLoginExpirationEnabled)
+	require.Equal(t, acc.Settings.PeerLoginExpiration, storeAccount.Settings.PeerLoginExpiration)
+	require.Equal(t, acc.Settings.GroupsPropagationEnabled, storeAccount.Settings.GroupsPropagationEnabled)
+	require.Equal(t, acc.Settings.RegularUsersViewBlocked, storeAccount.Settings.RegularUsersViewBlocked)
+	require.Equal(t, acc.Settings.PeerInactivityExpirationEnabled, storeAccount.Settings.PeerInactivityExpirationEnabled)
+	require.Equal(t, acc.Settings.PeerInactivityExpiration, storeAccount.Settings.PeerInactivityExpiration)
+
+	require.NotNil(t, storeAccount.Settings.Extra)
+	require.Equal(t, acc.Settings.Extra.PeerApprovalEnabled, storeAccount.Settings.Extra.PeerApprovalEnabled)
+	require.Equal(t, acc.Settings.Extra.IntegratedValidatorGroups, storeAccount.Settings.Extra.IntegratedValidatorGroups)
 }

@@ -22,9 +22,9 @@ import (
 )
 
 type MockAccountManager struct {
-	GetOrCreateAccountByUserFunc func(ctx context.Context, userId, domain string) (*server.Account, error)
-	GetAccountFunc               func(ctx context.Context, accountID string) (*server.Account, error)
-	CreateSetupKeyFunc           func(ctx context.Context, accountId string, keyName string, keyType server.SetupKeyType,
+	GetOrCreateAccountIDByUserFunc func(ctx context.Context, userId, domain string) (string, error)
+	GetAccountFunc                 func(ctx context.Context, accountID string) (*server.Account, error)
+	CreateSetupKeyFunc             func(ctx context.Context, accountId string, keyName string, keyType server.SetupKeyType,
 		expiresIn time.Duration, autoGroups []string, usageLimit int, userID string, ephemeral bool) (*server.SetupKey, error)
 	GetSetupKeyFunc                     func(ctx context.Context, accountID, userID, keyID string) (*server.SetupKey, error)
 	AccountExistsFunc                   func(ctx context.Context, accountID string) (bool, error)
@@ -89,7 +89,7 @@ type MockAccountManager struct {
 	GetDNSSettingsFunc                  func(ctx context.Context, accountID, userID string) (*server.DNSSettings, error)
 	SaveDNSSettingsFunc                 func(ctx context.Context, accountID, userID string, dnsSettingsToSave *server.DNSSettings) error
 	GetPeerFunc                         func(ctx context.Context, accountID, peerID, userID string) (*nbpeer.Peer, error)
-	UpdateAccountSettingsFunc           func(ctx context.Context, accountID, userID string, newSettings *server.Settings) (*server.Account, error)
+	UpdateAccountSettingsFunc           func(ctx context.Context, accountID, userID string, newSettings *server.Settings) (*server.Settings, error)
 	LoginPeerFunc                       func(ctx context.Context, login server.PeerLogin) (*nbpeer.Peer, *server.NetworkMap, []*posture.Checks, error)
 	SyncPeerFunc                        func(ctx context.Context, sync server.PeerSync, accountID string) (*nbpeer.Peer, *server.NetworkMap, []*posture.Checks, error)
 	InviteUserFunc                      func(ctx context.Context, accountID string, initiatorUserID string, targetUserEmail string) error
@@ -176,16 +176,16 @@ func (am *MockAccountManager) DeletePeer(ctx context.Context, accountID, peerID,
 	return status.Errorf(codes.Unimplemented, "method DeletePeer is not implemented")
 }
 
-// GetOrCreateAccountByUser mock implementation of GetOrCreateAccountByUser from server.AccountManager interface
-func (am *MockAccountManager) GetOrCreateAccountByUser(
+// GetOrCreateAccountIDByUser mock implementation of GetOrCreateAccountByUser from server.AccountManager interface
+func (am *MockAccountManager) GetOrCreateAccountIDByUser(
 	ctx context.Context, userId, domain string,
-) (*server.Account, error) {
-	if am.GetOrCreateAccountByUserFunc != nil {
-		return am.GetOrCreateAccountByUserFunc(ctx, userId, domain)
+) (string, error) {
+	if am.GetOrCreateAccountIDByUserFunc != nil {
+		return am.GetOrCreateAccountIDByUserFunc(ctx, userId, domain)
 	}
-	return nil, status.Errorf(
+	return "", status.Errorf(
 		codes.Unimplemented,
-		"method GetOrCreateAccountByUser is not implemented",
+		"method GetOrCreateAccountIDByUser is not implemented",
 	)
 }
 
@@ -672,7 +672,7 @@ func (am *MockAccountManager) GetPeer(ctx context.Context, accountID, peerID, us
 }
 
 // UpdateAccountSettings mocks UpdateAccountSettings of the AccountManager interface
-func (am *MockAccountManager) UpdateAccountSettings(ctx context.Context, accountID, userID string, newSettings *server.Settings) (*server.Account, error) {
+func (am *MockAccountManager) UpdateAccountSettings(ctx context.Context, accountID, userID string, newSettings *server.Settings) (*server.Settings, error) {
 	if am.UpdateAccountSettingsFunc != nil {
 		return am.UpdateAccountSettingsFunc(ctx, accountID, userID, newSettings)
 	}
